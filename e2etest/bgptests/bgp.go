@@ -147,6 +147,45 @@ var _ = ginkgo.Describe("BGP", func() {
 			}),
 	)
 
+	ginkgo.Describe("Service with ETP=cluster", func() {
+		ginkgo.It("IPV4 - should not be announced from a node with a NetworkUnavailable condition", func() {
+			allNodes, err := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+			framework.ExpectNoError(err)
+			nodeToSet := allNodes.Items[0].Name
+
+			_, svc := setupBGPService(f, ipfamily.IPv4, []string{v4PoolAddresses}, FRRContainers, func(svc *corev1.Service) {
+				testservice.TrafficPolicyCluster(svc)
+			})
+			defer testservice.Delete(cs, svc)
+			validateDesiredLB(svc)
+
+			for _, c := range FRRContainers {
+				validateService(svc, allNodes.Items, c)
+			}
+
+			err = k8s.SetNodeCondition(cs, nodeToSet, corev1.NodeNetworkUnavailable, corev1.ConditionTrue)
+			framework.ExpectNoError(err)
+			defer func() {
+				err = k8s.SetNodeCondition(cs, nodeToSet, corev1.NodeNetworkUnavailable, corev1.ConditionFalse)
+				framework.ExpectNoError(err)
+			}()
+
+			ginkgo.By("validating service is not announced from the unavailable node")
+			for _, c := range FRRContainers {
+				Eventually(func() error {
+					return validateServiceNoWait(svc, []corev1.Node{allNodes.Items[0]}, c)
+				}, time.Minute, time.Second).Should(HaveOccurred())
+			}
+
+			ginkgo.By("validating service is announced from the other available nodes")
+			for _, c := range FRRContainers {
+				Eventually(func() error {
+					return validateServiceNoWait(svc, allNodes.Items[1:], c)
+				}, time.Minute, time.Second).ShouldNot(HaveOccurred())
+			}
+		})
+	})
+
 	ginkgo.DescribeTable("A service of protocol load balancer should work with ETP=local", func(pairingIPFamily ipfamily.Family, poolAddresses []string, tweak testservice.Tweak) {
 
 		jig, svc := setupBGPService(f, pairingIPFamily, poolAddresses, FRRContainers, func(svc *corev1.Service) {
@@ -807,6 +846,20 @@ var _ = ginkgo.Describe("BGP", func() {
 				false,
 				ipfamily.IPv4,
 				[]metallbv1beta1.Community{}),
+			ginkgo.Entry("FRR - IPV4 - large community and localpref",
+				"192.168.10.0/24",
+				"192.168.16.0/24",
+				metallbv1beta1.BGPAdvertisement{
+					ObjectMeta: metav1.ObjectMeta{Name: "advertisement"},
+					Spec: metallbv1beta1.BGPAdvertisementSpec{
+						Communities:    []string{"large:123:456:7890"},
+						LocalPref:      50,
+						IPAddressPools: []string{"bgp-with-advertisement"},
+					},
+				},
+				false,
+				ipfamily.IPv4,
+				[]metallbv1beta1.Community{}),
 			ginkgo.Entry("IPV4 - localpref",
 				"192.168.10.0/24",
 				"192.168.16.0/24",
@@ -972,8 +1025,21 @@ var _ = ginkgo.Describe("BGP", func() {
 				},
 				false,
 				ipfamily.IPv6,
+				[]metallbv1beta1.Community{}),
+			ginkgo.Entry("FRR - IPV6 - large community and localpref",
+				"fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18",
+				"fc00:f853:0ccd:e799::19-fc00:f853:0ccd:e799::26",
+				metallbv1beta1.BGPAdvertisement{
+					ObjectMeta: metav1.ObjectMeta{Name: "advertisement"},
+					Spec: metallbv1beta1.BGPAdvertisementSpec{
+						Communities:    []string{"large:123:456:7890"},
+						LocalPref:      50,
+						IPAddressPools: []string{"bgp-with-advertisement"},
+					},
+				},
+				false,
+				ipfamily.IPv6,
 				[]metallbv1beta1.Community{}))
-
 	})
 
 	ginkgo.Context("MetalLB FRR rejects", func() {
